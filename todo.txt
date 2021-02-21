@@ -1,0 +1,84 @@
+PERSONAL BEST:
+
+Done:
+----
+[x] Model class
+[x] Relu activation function
+[x] Generalize data type (instead of forcing vector<float>)
+[x] Finish up that logging thing (header+payload format)
+[x] Input/output pair testing
+[x] Name the library
+    - <strikethrough>RelaxorFlow</strikethrough>
+    - <strikethrough>Spanner X</strikethrough>
+    - <strikethrough>Copter</strikethrough>
+    - <strikethrough>TensorChopper</strikethrough>
+    - TensorCopter 👌👌👌👌👌👌👌
+[x] Softmax layer
+[x] Figure out why training is slow (cause it is)
+[x] Figure out why training gets ~10x faster after ~100 batches
+[x] Make fc layer own its activation functions
+[x] Optimize out redundant ff call
+[x] Improve performance (caching)
+[x] Debug NaNs
+[x] Add runtime rank support
+[x] Fix reference counting for RTSpan
+[x] Fix template specialization for TSpan if possible
+[x] Update base layer type to use runtime rank
+[x] Update fc to construct TSpan from RTSpan
+[x] Fix any other code broken by new Tensor stuff
+[x] Decide optimization API
+	-> Have optimizer class as member var for each param tensor in a 
+	   layer. Optimizer class has interface that eats RTSpan for param grad 
+	   and spits out Tensor for weight updates.
+	-> Idea is  custom optmimizers ingerit from base 
+    -> Considerations: regularization, advanced learning algorithms (adam, etc.)
+    -> LR scheduling
+[x] Redefine goal
+[x] Implement optimizers
+[x] Debug Adam
+
+
+To do (roughly ordered by what we want to do next):
+--------------------------------------------------
+[ ] Reorganize/clean up code now that some things have become more stable
+    - Get rid of some of the "convert-to-tspan" boilerplate
+	- Pass TSpans by value (what about RTSpans?)
+	- Let tensorunary, tensoreltwise take tensors
+[ ] RNN layer
+[ ] Embeddings layer (pre-trained?)
+    -> Load serialized layer weights?
+[ ] Fix seeding?
+[ ] Update PBT to use new Tensor stuff
+    - A^T^T = A 
+    - A*B = (B^T * A^T)^T
+    - A[index] = A^T[back_index]
+[ ] Add special-case optimization in softmax::bp
+    -> Sparsity optimization
+[/] Write the permute_indices (or transpose) function
+[ ] Save trained models
+[ ] Read model from JSON/XML/etc.
+[ ] Basic matrix ops 
+    - Matrix addition / subtraction
+	- Scalar multiplication
+	- Generate identity?
+	- Reduction along a given dimension
+	- Broadcasting
+[ ] CNN layer
+[ ] DFG instead of std::vector<layers>
+[ ] Consider changing int to uint with check underflow debug build
+[ ] Check optimization of member initialization list
+
+[ ] Find a cool application
+    - Reverse dictionary
+	- Differentiable fluid simulation ???
+
+
+[ ] Write docs
+
+Cancelled:
+----------
+
+[N] Code review the generalized layer data types 
+[N] Redesign from scratch generalized layer data
+    -> Found a better solution
+

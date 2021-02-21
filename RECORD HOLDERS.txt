@@ -1,0 +1,27 @@
+==========================================================
+Architecture:   
+ - Layer 1: 512x784, oddln, GD with lr at 0.015
+ - Layer 2: 10x512, identity, GD with lr at 0.015
+ - Layer 3: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 1
+---------------------------------------------------------
+Result:         91.07%
+=========================================================
+
+
+==========================================================
+Architecture:   
+ - Layer 1: 512x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 10x512, identity, ADAM with lr at 0.001
+ - Layer 3: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 1
+---------------------------------------------------------
+Result:         93.35%
+=========================================================
+
