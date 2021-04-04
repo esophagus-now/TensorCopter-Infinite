@@ -233,6 +233,28 @@ struct TSpan {
 		);
         return ret;
     }
+    
+    TSpan<2, T> submat(int x0, int y0, int xsz, int ysz) const {
+        //Assert in bounds
+        assert(x0 + xsz <= dims[1]);
+        assert(y0 + ysz <= dims[0]);
+		assert(x0 >= 0);
+		assert(y0 >= 0);
+        int *new_dims = new int[2];
+        int *new_strides = new int[2];
+        new_dims[0] = ysz; new_dims[1] = xsz;
+        new_strides[0] = strides[0];
+        new_strides[1] = strides[1];
+
+        T const* new_data = data + (y0 * strides[0]) + (x0 * strides[1]);
+
+        return TSpan<2,T>(
+            new_data, 
+            new_dims, 
+            new_strides, 
+            new RCTSpanData(new_dims, new_strides)
+        );
+    }
 
     int length() const {
       return dims[0];
@@ -557,6 +579,7 @@ struct Tensor {
 
 	template <int rank>
 	TSpan<rank, T> const as_tspan() const {
+		assert(initialized());
 		return TSpan<rank, T>(*this);
 	}
 
@@ -565,11 +588,13 @@ struct Tensor {
     }
 
     explicit operator RTSpan<T>() const {
+		assert(initialized());
         return RTSpan<T>(storage.data(), rank, dims.data(), strides.data());
     }
 
     template<int span_rank>
     explicit operator TSpan<span_rank, T>() const {
+		assert(initialized());
         if (span_rank != this->rank) {
           throw std::runtime_error("TSpan rank doesn't match Tensor Rank.");
         }
@@ -584,14 +609,22 @@ struct Tensor {
     }
 
     void dump(std::ostream &o) const {
-        o << "np.array(" << *this << ")";
+		if (initialized())
+        	o << "np.array(" << *this << ")";
+		else
+			o << "\"Empty tensor\"";
     }
 
     bool operator==(Tensor<T> const& other) const {
+		assert(initialized());
         return &(*this) == &other;
     }
 
-	bool initialized() {
+	static Tensor<T> empty() {
+		return Tensor<T>();
+	}
+
+	bool initialized() const {
 		return rank > 0; //I can't remember, can rank be equal to 0?
 	}
 
@@ -605,8 +638,8 @@ struct Tensor {
 //thx
 template<typename T>
 Tensor<T> make_tensor(std::initializer_list<int> const dims,
-                            std::initializer_list<T> const vals
-							) {
+                      std::initializer_list<T> const vals
+					  ) {
     std::vector<int> dims_vec(dims);
     std::vector<T> vals_vec(vals);
 
@@ -647,17 +680,18 @@ void> tensormul(
     TSpan<RHS_rank, T> const& B,
     T& dest
 ) {
-    dest = T();
+    //dest = T(); 
+	//Assume already initialized; this is important for supporting 
+	//multiply-accumulate, e.g. in block matrix mult
     for (int i = 0; i < A.dims[0]; i++) {
       dest += A[i] * B[i];
     }
     return;
 }
 
-//Does NOT perform any safety checks. Will default-construct all
-//elements in the output
+//Does NOT perform any safety checks.
 template<int LHS_rank, int RHS_rank, typename T>
-std::enable_if_t<(LHS_rank > 1),
+std::enable_if_t<(LHS_rank > 2) || (LHS_rank == 2 && RHS_rank != 2),
 void> tensormul(
     TSpan<LHS_rank, T> const& A, 
     TSpan<RHS_rank, T> const& B,
@@ -668,8 +702,7 @@ void> tensormul(
     }
 }
 
-//Does NOT perform any safety checks. Will default-construct all
-//elements in the output
+//Does NOT perform any safety checks. 
 template<int LHS_rank, int RHS_rank, typename T>
 std::enable_if_t<(LHS_rank == 1) && (RHS_rank > 1),
 void> tensormul(
@@ -680,6 +713,112 @@ void> tensormul(
     for (int i = 0; i < B.dims[RHS_rank-1]; i++) {
         tensormul(A, B.back_index(i), dest.back_index(i));
     }
+}
+
+//TODO: find a nicer way to supply the block size
+#define BSZ 64
+//TODO: 64 is just a magic number
+
+template<typename T>
+Tensor<TSpan<2,T> > tilize(TSpan<2,T> A) {
+/*
+
+   +-------------+-------------+-------------+-------+
+   |             |             |             |       |
+   |             |             |             |       |
+   |   BSZ*BSZ   |   BSZ*BSZ   |   BSZ*BSZ   |       |
+   |             |             |             |       |
+   |             |             |             |       |
+   +-------------+-------------+-------------+-------+
+   |             |             |             |       |
+   |             |             |             |       |
+   |   BSZ*BSZ   |   BSZ*BSZ   |   BSZ*BSZ   |       |
+   |             |             |             |       |
+   |             |             |             |       |
+   +-------------+-------------+-------------+-------+
+   |             |             |             |  XX   |
+   +-------------+-------------+-------------+-------+
+
+*/	
+
+	//Uses a neat little trick:
+	//     (A + (B-1)) / B = ceil(A/B)
+	//                 ^           ^
+	//Integer division /           |
+	//Regular division------------/
+
+	int blocks_dims[2] = {
+		(A.dims[0] + BSZ - 1) / BSZ, 
+		(A.dims[1] + BSZ - 1) / BSZ
+	};
+
+	Tensor<TSpan<2,T>> blocks(blocks_dims, 2);
+    auto blocks_spn = blocks.template as_tspan<2>();
+    
+    for (int y = 0, yy = 0; y < blocks.dims[0]; y++, yy += BSZ) {
+        int y_space = A.dims[0] - yy;
+        int ybsz = (y_space > BSZ) ? BSZ : y_space;
+
+		int x, xx;
+        //Do the first n - 1
+        for (x = 0, xx = 0; x < blocks.dims[1] - 1; x++, xx += BSZ) {
+            blocks_spn[y][x] = A.submat(xx, yy, BSZ, ybsz);
+        }
+        //Do the last one
+        int xbsz = A.dims[1] - xx;
+        assert(xbsz > 0);
+        assert(xbsz <= BSZ);
+        blocks_spn[y][x] = A.submat(xx, yy, xbsz, ybsz);
+    }
+
+    return blocks;
+}
+
+//Special overload for doing tiling matrix multiplications
+template<int LHS_rank, int RHS_rank, typename T>
+std::enable_if_t<(LHS_rank == 2) && (RHS_rank == 2),
+void> tensormul(
+    TSpan<LHS_rank, T> const& A, 
+    TSpan<RHS_rank, T> const& B,
+    TSpan<2, T> dest
+) {
+	if (
+		A.dims[0] <= BSZ ||
+		B.dims[0] <= BSZ ||
+		B.dims[1] <= BSZ
+	) {
+		for (int i = 0; i < A.dims[0]; i++) {
+			tensormul(A[i], B, dest[i]);
+		}
+	} else {
+		//copy in the block matmul
+        assert(A.dims[1] == B.dims[0]);
+        assert(dest.dims[0] == A.dims[0]);
+        assert(dest.dims[1] == B.dims[1]);
+
+        //Start by creating a matrix of blocks (where each block is itself 
+        //a matrix of size bsz*bsz) for the inputs and the output
+
+        Tensor<TSpan<2,T>> lhs_blocks = tilize(A);
+        Tensor<TSpan<2,T>> rhs_blocks = tilize(B);
+        Tensor<TSpan<2,T>> res_blocks = tilize(dest);
+
+        auto lhs_blocks_spn = lhs_blocks.template as_tspan<2>();
+        auto rhs_blocks_spn = rhs_blocks.template as_tspan<2>();
+        auto res_blocks_spn = res_blocks.template as_tspan<2>();
+
+        //Now iterate over all blocks of the output and calculate the 
+        //matrix product 
+        for (int i = 0; i < res_blocks_spn.dims[0]; i++) {
+            for (int j = 0; j < res_blocks_spn.dims[1]; j++) {
+                for (int k = 0; k < lhs_blocks_spn.dims[1]; k++) {
+                    tensormul(lhs_blocks_spn[i][k], rhs_blocks_spn[k][j], res_blocks_spn[i][j]);
+                }
+            }
+        }
+
+        //Phew!
+	}
 }
 
 template<int LHS_rank, int RHS_rank, typename T>
@@ -728,16 +867,18 @@ Tensor<T> tensormul(
 //data pointer in the TSpan. This has to support proper striding
 template <int rank, typename fn, typename T>
 std::enable_if_t<rank == 1,
-void> tensorunary(TSpan<rank, T> t, fn F) {
+void> tensorunary(TSpan<rank, T> const t, TSpan<rank, T> dest, fn F) {
+	assert(t.dims[0] == dest.dims[0]);
 	for (int i = 0; i < t.dims[0]; i++)
-		F(t[i]);
+		dest[i] = F(t[i]);
 }
 
 template <int rank, typename fn, typename T>
 std::enable_if_t<(rank > 1),
-void> tensorunary(TSpan<rank, T> t, fn F) {
+void> tensorunary(TSpan<rank, T> const t, TSpan<rank, T> dest, fn F) {
+	assert(t.dims[0] == dest.dims[0]);
 	for (int i = 0; i < t.dims[0]; i++)
-		tensorunary<rank - 1, fn, T>(t[i], F);
+		tensorunary<rank - 1, fn, T>(t[i], dest[i], F);
 }
 
 //The dest TSpan can safely alias either (or both) of the 
@@ -763,13 +904,42 @@ void> tensoreltwise(TSpan<rank,T> const lhs, TSpan<rank,T> const rhs, TSpan<rank
 	}
 }
 
+template <typename fn, typename T>
+void tensoreltwise(RTSpan<T> const lhs, RTSpan<T> const rhs, RTSpan<T> dest, fn F) {
+	assert(lhs.rank == rhs.rank);
+	assert(lhs.rank > 0); //Are we allowed to have rank 0?
+	assert(lhs.dims[0] == rhs.dims[0]);
+	assert(lhs.dims[0] == dest.dims[0]);
+
+	if (lhs.rank == 1) {
+		//Base case 
+		for (int i = 0; i < lhs.dims[0]; i++) {
+			*dest[i] = F(*lhs[i], *rhs[i]);
+		}
+	} else {
+		for (int i = 0; i < lhs.dims[0]; i++) {
+			tensoreltwise(lhs[i], rhs[i], dest[i], F);
+		}
+	}
+}
+
 template <int rank, typename T>
 void tensorplus(TSpan<rank,T> const lhs, TSpan<rank,T> const rhs, TSpan<rank,T> dest) {
 	tensoreltwise(lhs, rhs, dest, std::plus<T>{});
 }
 
+template <typename T>
+void tensorplus(RTSpan<T> const lhs, RTSpan<T> const rhs, RTSpan<T> dest) {
+	tensoreltwise(lhs, rhs, dest, std::plus<T>{});
+}
+
 template <int rank, typename T>
 void tensorprod(TSpan<rank,T> const lhs, TSpan<rank,T> const rhs, TSpan<rank,T> dest) {
+	tensoreltwise(lhs, rhs, dest, std::multiplies<T>{});
+}
+
+template <int rank, typename T>
+void tensorprod(RTSpan<T> const lhs, RTSpan<T> const rhs, RTSpan<T> dest) {
 	tensoreltwise(lhs, rhs, dest, std::multiplies<T>{});
 }
 

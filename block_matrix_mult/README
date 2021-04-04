@@ -1,0 +1,36 @@
+Can we get performance gains by breaking up matrix mults
+into smaller tiles? The idea is that you would get better
+data reuse in the CPU cache
+
+Preliminary results look ridiculously good:
+
+512x512 raw tensormuls: 100 iterations in 60094 ms
+512x512 block matrix mults (bsz = 512): 100 iterations in 63352 ms
+512x512 block matrix mults (bsz = 256): 100 iterations in 37995 ms
+512x512 block matrix mults (bsz = 128): 100 iterations in 31171 ms
+512x512 block matrix mults (bsz = 64): 100 iterations in 31036 ms
+512x512 block matrix mults (bsz = 32): 100 iterations in 35317 ms
+512x512 block matrix mults (bsz = 16): 100 iterations in 56944 ms
+
+Sadly, repl.it is a little inconsistent with run speed. (Also, my
+local installation of g++ is broken). But anwyay, here's the results
+from a different run:
+
+512x512 raw tensormuls: 100 iterations in 75852 ms
+512x512 block matrix mults (bsz = 512): 100 iterations in 74341 ms
+512x512 block matrix mults (bsz = 256): 100 iterations in 44316 ms
+512x512 block matrix mults (bsz = 128): 100 iterations in 32931 ms
+512x512 block matrix mults (bsz = 64): 100 iterations in 40987 ms
+512x512 block matrix mults (bsz = 32): 100 iterations in 88273 ms
+512x512 block matrix mults (bsz = 16): 100 iterations in 65500 ms
+
+And one more run:
+
+512x512 raw tensormuls: 100 iterations in 96965 ms
+512x512 block matrix mults (bsz = 512): 100 iterations in 77421 ms
+512x512 block matrix mults (bsz = 256): 100 iterations in 78682 ms
+512x512 block matrix mults (bsz = 128): 100 iterations in 60106 ms
+512x512 block matrix mults (bsz = 64): 100 iterations in 40451 ms
+512x512 block matrix mults (bsz = 32): 100 iterations in 55058 ms
+512x512 block matrix mults (bsz = 16): 100 iterations in 67340 ms
+

@@ -160,3 +160,76 @@ vector<tpair> load_mnist_training(std::string const& base) {
 
 	return ret;
 }
+
+vector<tpair> load_mnist_testing(std::string const& base) {
+	vector<tpair> ret;
+
+	FILE *train_imgs = fopen((base + "/t10k-images-idx3-ubyte.txt").c_str(), "rb");
+	if (!train_imgs) {
+		perror("Could not open testing images");
+		throw "whatever";
+	}
+	
+	FILE *train_lbls = fopen((base + "/t10k-labels-idx1-ubyte.txt").c_str(), "rb");
+	if (!train_lbls) {
+		perror("Could not open testing labels");
+		throw "whatever";
+	}
+	
+	fix_endian x;
+
+	fread(&x, 4, 1, train_imgs);
+	uint32_t img_magic = get_val(x);
+	if (img_magic != 0x803) {
+		fprintf(stderr, "Marco got the endianness wrong.\n");
+		throw "stupid endianness";
+	}
+
+	fread(&x, 4, 1, train_lbls);
+	uint32_t lbl_magic = get_val(x);
+	if (lbl_magic != 0x801) {
+		fprintf(stderr, "Marco got the endianness wrong.\n");
+		throw "stupid endianness";
+	}
+
+	fread(&x, 4, 1, train_imgs);
+	uint32_t num_imgs = get_val(x);
+	fread(&x, 4, 1, train_lbls);
+	assert(num_imgs == get_val(x));
+
+	fread(&x, 4, 1, train_imgs);
+	assert(get_val(x) == 28);
+	fread(&x, 4, 1, train_imgs);
+	assert(get_val(x) == 28);
+
+	//Okay. We validated all our inputs, so now we can write some 
+	//simpler code 
+
+	int i;
+	for (i = 0; i < num_imgs; i++) {
+		unsigned char img[784];
+		unsigned char lbl;
+
+		fread(img, 1, 784, train_imgs);
+		fread(&lbl, 1, 1, train_lbls);
+
+		vector<float> fimg;
+		fimg.reserve(784);
+
+		vector<float> flbl(10, 0.0);
+
+		int j;
+		for (j = 0; j < 784; j++) {
+			fimg.push_back(float(img[j])/255.0);
+		}
+
+		flbl[lbl] = 1.0;
+
+		ret.push_back({fimg, flbl});
+	}
+
+	fclose(train_imgs);
+	fclose(train_lbls);
+
+	return ret;
+}

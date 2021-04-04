@@ -1,74 +1,42 @@
+#ifndef OPTIMIZERS_H
+#define OPTIMIZERS_H 1
+
 #include "base_types.h"
 #include "tensor.h"
 #include <algorithm> //std::equa
 #include <cmath>
 #include <iostream>
+#include <random>
 
-template <int rank>
-struct GD : optimizer {
-	float lr;
-
-	//Could we do better?
-	//https://en.cppreference.com/w/cpp/language/aggregate_initialization
-	GD(float lr) : lr(lr) {}
-
-	void update(RTSpan<float>& params, RTSpan<float> const& grad) override {
-		auto params_span = params.as_tspan<rank>(); //Includes rank-check
-		auto grad_span = grad.as_tspan<rank>();
-		assert(std::equal(params.dims, params.dims+rank, grad.dims));
-
-		tensoreltwise(params_span, grad_span, params_span, 
-			[=](float lhs, float rhs) -> float {return lhs - lr*rhs;}
-		);
+struct no_opt : optimizer {
+	Tensor<float> get_deltas(RTSpan<float> const& grad) override {
+		//Tensor<T>::operator bool() returns false on a default-constructed
+		//Tensor<T>. In optimizer::update, we don't do anything if get_deltas
+		//returns a Tensor that evaluates to false.
+		return Tensor<float>();
 	}
 };
 
 template <int rank>
-struct SGD : optimizer {
-	int batch_sz; 
-	int cur_batch;
+struct GD : compiletime_rank_optimizer<rank> {
 	float lr;
 
-	Tensor<float> accum;
+	GD(float lr) : lr(lr) {}
 
-	SGD(int batch_sz = 32, float lr = 0.015)
-	: batch_sz(batch_sz), cur_batch(0), lr(lr)
-	{}
-	
-	float operator()(float lhs, float rhs) {
-		return lhs - lr*rhs;
-	}
+	Tensor<float> get_deltas(RTSpan<float> const& grad) override {
+		Tensor<float> ret(grad.dims, grad.rank);
 
-	//FIXME: this function has no way to detect if only a partial batch 
-	//was given, so the last batch may not actually trigger a parameter
-	//update.
-	void update(RTSpan<float>& params, RTSpan<float> const& grad) override {
-		auto params_span = params.as_tspan<rank>(); //Includes rank-check
-		auto grad_span = grad.as_tspan<rank>();
-		assert(std::equal(params.dims, params.dims+rank, grad.dims));
+		tensorunary(grad.as_tspan<rank>(), ret.as_tspan<rank>(),
+			[=](float f) {return -lr*f;}
+		);
 
-		if (cur_batch == 0) {
-			//TODO: We should have a move-assign operator in Tensor for 
-			//just such an occasion
-			accum = Tensor<float>(grad);
-		} else {
-			assert(std::equal(grad.dims,grad.dims+rank,accum.dims.begin()));
-			
-			auto accum_spn = accum.as_tspan<rank>();
-			tensorplus(accum_spn, grad, accum_spn);
-		}
-		cur_batch++;
-
-		if (cur_batch == batch_sz) {
-			tensoreltwise(params_span, grad_span, params_span, this);
-			cur_batch = 0;
-		}
+		return ret;
 	}
 };
 
 //https://www.paperswithcode.com/method/adam
 template <int rank>
-struct Adam : optimizer {
+struct Adam: compiletime_rank_optimizer<rank> {
 	float eta;
 	float beta1, beta2;
 	float eps;
@@ -93,10 +61,8 @@ struct Adam : optimizer {
 		v_spn = v.as_tspan<rank>();
 	}
 
-	void update(RTSpan<float>& params, RTSpan<float> const& grad) override {
-		auto params_spn = params.as_tspan<rank>(); //Includes rank-check
-		auto grad_spn = grad.as_tspan<rank>();
-		assert(std::equal(params.dims,params.dims+rank,grad.dims));
+	Tensor<float> get_deltas(RTSpan<float> const& grad) override {
+		auto grad_spn = grad.as_tspan<rank>(); //Includes rank-check
 
 		t++;
 		beta1_to_the_t *= beta1;
@@ -117,20 +83,60 @@ struct Adam : optimizer {
         //m_hat = m / (1 - pow(beta1, t));
         //v_hat = v / (1 - pow(beta2, t));
 		//params = params - eta * m_hat / sqrt(v_hat) + eps;
-		Tensor<float> temp(params_spn.dims, rank);
+		Tensor<float> updates(grad.dims, rank);
         
-		//temp = eta * m_hat / sqrt(v_hat) + eps;
+		//updates = eta * m_hat / sqrt(v_hat) + eps;
 		float one_minus_beta1_to_the_t = 1 - beta1_to_the_t;
 		float one_minus_beta2_to_the_t = 1 - beta2_to_the_t;
-        tensoreltwise(m_spn, v_spn, temp.as_tspan<rank>(), [=](float lhs, float rhs) {
+        tensoreltwise(m_spn, v_spn, updates.as_tspan<rank>(), [=](float lhs, float rhs) {
             float m_hat = lhs / one_minus_beta1_to_the_t;
             float v_hat = rhs / one_minus_beta2_to_the_t;
-            return eta * m_hat / (sqrt(v_hat) + eps);
+            return -eta * m_hat / (sqrt(v_hat) + eps);
         });
-            
-        // params = params - temp
-        tensoreltwise(params_spn, temp.as_tspan<rank>(), params_spn, [=](float lhs, float rhs) {
-            return lhs - rhs;
-        });
+
+		return updates;
     }
 };
+
+//This isn't really a good way to do it. The ideal way would be to rerun 
+//feed-forward right after and see if the random perturbation improved the 
+//cost; if so keep, if not, discard.
+template <int rank>
+struct simulated_annealing: compiletime_rank_optimizer_wrapper<rank> {
+	std::unique_ptr<optimizer> impl;
+	float temperature;
+	float alpha;
+
+	std::default_random_engine gen;
+
+	//Hmmm.... should we take in the optimizer by pointer, by reference,
+	//or by unique_ptr r-value?
+	simulated_annealing(optimizer *o, float t0 = 0.05, float alpha = 0.995) 
+		: impl(std::unique_ptr<optimizer>(o)), temperature(t0), alpha(alpha)
+	{}
+
+	void advise_size(int const *dims, int _rank) override {
+		impl->advise_size(dims, _rank);
+	}
+
+	//Currently does nothing to the underlying deltas
+	//TODO: Add some random perturbation that is "scaled" by the 
+	//current temperature, and the application of the temperature
+	//schedule.
+	Tensor<float> get_deltas(RTSpan<float> const& grad) override {
+		Tensor<float> ret = this->call_get_deltas(impl.get(),grad);
+
+		auto dist = std::uniform_real_distribution(-temperature, temperature);
+
+		auto ret_spn = ret.as_tspan<rank>();
+		tensorunary(ret_spn, ret_spn, 
+			[&] (float f) {return f + dist(gen);}
+		);
+
+		temperature *= alpha;
+
+		return ret;
+	}
+};
+
+#endif

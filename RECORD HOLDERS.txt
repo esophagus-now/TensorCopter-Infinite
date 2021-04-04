@@ -1,5 +1,73 @@
 ==========================================================
 Architecture:   
+ - Layer 1: perturbator with t = 1.0 (random gen expensive)
+ - Layer 2: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 3: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 4: 10x64, identity, ADAM with lr at 0.001
+ - Layer 5: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 2
+---------------------------------------------------------
+Result:         84.76%
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 2
+---------------------------------------------------------
+Result:         94.47%
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: perturbator with t = 0.015 (random gen expensive)
+ - Layer 2: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 3: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 4: 10x64, identity, ADAM with lr at 0.001
+ - Layer 5: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 2
+---------------------------------------------------------
+Result:         94.50%
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: perturbator with t = 0.015 (random gen expensive)
+            -> Removed after training completed
+ - Layer 2: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 3: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 4: 10x64, identity, ADAM with lr at 0.001
+ - Layer 5: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 2
+---------------------------------------------------------
+Result:         94.50%
+=========================================================
+
+
+
+
+
+NOTE: these need to be remeasured now that evaluate_mnist has
+been updated (it used to just measure the accuracy on the training
+set, but now it measures accuracy on the testing set)
+
+==========================================================
+Architecture:   
  - Layer 1: 512x784, oddln, GD with lr at 0.015
  - Layer 2: 10x512, identity, GD with lr at 0.015
  - Layer 3: Softmax
@@ -8,9 +76,22 @@ Batch size: 32
 Num batches: 1874
 Epochs: 1
 ---------------------------------------------------------
-Result:         91.07%
+Result:         ??? (old: 91.07%)
 =========================================================
 
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 10x128, identity, ADAM with lr at 0.001
+ - Layer 3: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 1
+Really fast, and sacrifices very little accuracy
+---------------------------------------------------------
+Result:         ??? (old: 93.11%)
+=========================================================
 
 ==========================================================
 Architecture:   
@@ -22,6 +103,89 @@ Batch size: 32
 Num batches: 1874
 Epochs: 1
 ---------------------------------------------------------
-Result:         93.35%
+Result:         ??? (old: 93.35%)
 =========================================================
 
+==========================================================
+Architecture:   
+ - Layer 1: 256x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 10x256, identity, ADAM with lr at 0.001
+ - Layer 3: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 1
+Obviously, much faster than using a hidden size of 512
+---------------------------------------------------------
+Result:         ??? (old: 93.38%)
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 1
+---------------------------------------------------------
+Result:         ??? (old: 93.74%)
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 2
+---------------------------------------------------------
+Result:         ??? (old: 95.04%)
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 3
+---------------------------------------------------------
+Result:         ??? (old: 96.16%)
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 10
+---------------------------------------------------------
+Result:         ??? (old: 98.72%)
+=========================================================
+
+==========================================================
+Architecture:   
+ - Layer 1: 128x784, oddln, ADAM with lr at 0.001
+ - Layer 2: 64x128, oddln, ADAM with lr at 0.001
+ - Layer 3: 10x64, identity, ADAM with lr at 0.001
+ - Layer 4: Softmax
+Cost function: NLL loss
+Batch size: 32
+Num batches: 1874
+Epochs: 50
+---------------------------------------------------------
+Result:         ??? (old: 99.73%)
+=========================================================

@@ -63,16 +63,35 @@ class Model : layer {
 
 public:
     std::vector<shared_ptr<layer> > layers;
-
+    std::vector<Tensor<float>> layer_outputs;
 
     Model() {}
 
-    //feed-forward
-    Tensor<float> ff(RTSpan<float> const& x, bool use_saved=false, bool save=false) override {
-        Tensor<float> cur(x);
-        int cur_dims = x.dims[1];
-		int layer_num = 1;
-        for (auto const& l : layers) {
+    Tensor<float> ff_impl(RTSpan<float> x, bool save,
+                          std::vector<Tensor<float>>& to_save) {
+
+        assert(layers.size() > 0);
+        if (layers.size() == 1) {
+			//There's nothing to save
+            return layers[0]->ff(x, save);
+        }
+
+		//Do the first layer. Separate case becasue uses x param
+        Tensor<float> cur; //Never used if save is true
+		                   //to_save never modified if save is false
+        int cur_dims;
+        if (save) {
+            to_save.clear();
+            to_save.push_back(layers[0]->ff(x, save));
+            cur_dims = to_save.back().dims.back();
+        } else {
+            cur = layers[0]->ff(x, save);
+            cur_dims = cur.dims.back();
+		}
+
+		//Do last n-2 layers
+        for (int layer_num = 1; layer_num < static_cast<int>(layers.size())-1; layer_num++) {
+            auto l = layers[layer_num];
             if (!l->can_accept(cur_dims)) {
                 throw std::runtime_error(
 					"Invalid model: layer " + 
@@ -82,42 +101,73 @@ public:
 				);
             }
             cur_dims = l->num_outputs(cur_dims);
-            cur = l->ff(&cur, use_saved, save);
-			layer_num++;
-        }
 
-        return cur;
+            if (save)
+                to_save.push_back(l->ff(&to_save.back(), save));
+            else
+               cur = l->ff(&cur, save);
+        }
+        
+		//And the final one, separate because we don't save the outputs 
+		//either way, but still need to check whether we are using cur
+        if (save)
+            return layers.back()->ff(&to_save.back(), save);
+        else
+            return layers.back()->ff(&cur, save);
+    }
+
+    //feed-forward
+    Tensor<float> ff(RTSpan<float> x, bool save=false) override {
+        return ff_impl(x, save, layer_outputs);
     }
 
     //backprop
-    virtual Tensor<float> bp(RTSpan<float> const& x, RTSpan<float> const& dy,
-                             bool use_saved=false) override {
+    Tensor<float> bp(RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
+                     bool use_saved=false) override {
         //Subtle bug: this used to be a vector of MSpans, but
         //then you get dangling pointers. This was happening 
         //because the actual result of running ff (see about 8-9
         //lines lower down) was being discarded but we were still
         //saving an MSpan into that matrix into the vector
-        std::vector<Tensor<float> > layer_inputs;
-        layer_inputs.emplace_back(x);
-        
-        assert(layers.size() > 0);
-        for (unsigned i = 0; i < layers.size() - 1; i++) {
-            layer_inputs.push_back(
-                layers[i]->ff(&layer_inputs.back(), use_saved, false)
-            );
-        }
 
-        Tensor<float> cur_dy(dy);
-        for (int i = layers.size() - 1; i >= 0; i--){
-            DEBUG("before_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
-            DEBUG("bp_inputs[" + to_string(i) + "]", ::dump(&layer_inputs[i]));
-            DEBUG("bp_dy_in[" + to_string(i) + "]", ::dump(&cur_dy));
-            cur_dy = layers[i]->bp(&layer_inputs[i], &cur_dy, use_saved);
-            DEBUG("after_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
-            DEBUG("bp_outputs[" + to_string(i) + "]", ::dump(&cur_dy));
-        }
-        
-        return cur_dy;
+		std::vector<Tensor<float>> newly_computed; //Not always used
+
+		std::vector<RTSpan<float>> fenceposts;
+
+		//fenceposts = {x, layer_outputs[1 .. n-1] , y}
+		fenceposts.push_back(x);
+        if (!use_saved) {
+			ff_impl(x, true, newly_computed);
+			for (unsigned i = 0; i < newly_computed.size(); i++) {
+				fenceposts.push_back(&newly_computed[i]);
+			}
+        } else {
+			for (unsigned i = 0; i < layer_outputs.size(); i++) {
+				fenceposts.push_back(&layer_outputs[i]);
+			}
+		}
+		fenceposts.push_back(y);
+
+		//Firt, do the last layer, whose output comes from our y parameter
+		//TODO: figure out what to do for the DEBUG statements
+		assert(layers.size() > 0);
+		
+		Tensor<float> cur_dy(dy);
+
+		assert(fenceposts.size() == 1 + (layers.size() - 1) + 1);
+
+		for (int i = fenceposts.size() - 1 - 1; i >= 0; i--){
+			DEBUG("before_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
+			DEBUG("bp_inputs[" + to_string(i) + "]", ::dump(fenceposts[i]));
+			DEBUG("bp_dy_in[" + to_string(i) + "]", ::dump(&cur_dy));
+			
+			cur_dy = layers[i]->bp(fenceposts[i], fenceposts[i+1], &cur_dy, use_saved);
+
+			DEBUG("after_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
+			DEBUG("bp_outputs[" + to_string(i) + "]", ::dump(&cur_dy));
+		}
+
+		return cur_dy;
     }
 
     // void append_fc_layer(int r, int c, activation_fn *act) {
@@ -133,24 +183,14 @@ public:
     }*/
 };
 
-
-template <typename fn, typename... T>
-void time_fn(int iterations, fn F, T... args) {
-    auto tic = chrono::high_resolution_clock::now();
-    for (int i = 0; i < iterations; i++) F(args...);
-    auto toc = chrono::high_resolution_clock::now();
-
-    auto duration = chrono::duration_cast<chrono::microseconds>(toc-tic).count();
-
-    cout << iterations << " iterations in " << duration << el;
-}
-
 ofstream debug_out;
 
 double evaluate_mnist(Model& model, const std::vector<tpair>& examples) {
     //int correct = 0;
     //int tot = examples.size();
     int input_mat_dims[2] = {1, 784};
+
+	cout << "Entered evaluate_mnist" << endl;
 
 	int num_correct = 0;
 	int num_incorrect = 0;
@@ -194,10 +234,10 @@ Model train_mnist(std::vector<tpair> examples) {
     constexpr int output_dim = 10;
     constexpr float lr = 0.001;
     Model model;
-    //model.add_layer(make_shared<fc>(512, input_dim, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
-	model.add_layer(make_shared<fc>(512, input_dim, new oddln(), new GD<2>(lr), new GD<1>(lr)));
-    //model.add_layer(make_shared<fc>(output_dim, 512, new identity(), new Adam<2>(lr), new Adam<1>(lr)));
-    model.add_layer(make_shared<fc>(output_dim, 512, new identity(), new GD<2>(lr), new GD<1>(lr)));
+	//model.add_layer(make_shared<perturbator<2> >(0.015));
+    model.add_layer(make_shared<fc>(128, input_dim, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
+	model.add_layer(make_shared<fc>(64, 128, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
+    model.add_layer(make_shared<fc>(output_dim, 64, new identity(), new Adam<2>(lr), new Adam<1>(lr)));
     model.add_layer(make_shared<softmax>());
 
     auto e = nll(); //sqerr();
@@ -205,7 +245,7 @@ Model train_mnist(std::vector<tpair> examples) {
                             //terminate early
     float cost = -1.0;
     Tensor<float> output;
-    #define max_epoch 1
+    #define max_epoch 30
     constexpr int batch_size = 32;
     int num_batches = examples.size() / batch_size;
     int epoch = 0;
@@ -244,7 +284,7 @@ Model train_mnist(std::vector<tpair> examples) {
             Tensor<float> expected_outputs(std::move(expected_output_data), output_dims, 2);
 
             last_cost = cost;
-            output = model.ff(&batch_inputs, false, true);
+            output = model.ff(&batch_inputs, true);
 
             cost = e.cc(&output, &expected_outputs);
 
@@ -252,7 +292,7 @@ Model train_mnist(std::vector<tpair> examples) {
 
             auto gradient = e.gg(&output, &expected_outputs);
 
-            model.bp(&batch_inputs, &gradient, true);
+            model.bp(&batch_inputs, &output, &gradient, true);
 
             batch_start_idx += this_batch_size;
         }
@@ -271,6 +311,16 @@ Model train_mnist(std::vector<tpair> examples) {
     cout << "Cost: " << cost << el;
     //cout << "Output: " << output << el;
 
+
+	int bleh = 0;
+	auto it = model.layers.begin();
+	while (it != model.layers.end()) {
+		bleh++;
+		if (std::dynamic_pointer_cast<perturbator<2> >(*it)) {
+			cout << "Erasing layer " << bleh << el;
+			it = model.layers.erase(it);
+		} else ++it;
+	}
     return model;
 }
 
@@ -289,7 +339,8 @@ int main() {
 #endif
     auto model = train_mnist(training_examples);
 
-	cout << "Percent accuracy: " << evaluate_mnist(model, training_examples) << "%" << el;
+	vector<tpair> testing_examples = load_mnist_testing("mnist");
+	cout << "Percent accuracy: " << evaluate_mnist(model, testing_examples) << "%" << el;
 
     debug_out << "]" << el;
 

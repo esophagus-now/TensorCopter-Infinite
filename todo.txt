@@ -1,4 +1,4 @@
-PERSONAL BEST:
+PERSONAL BEST: 
 
 Done:
 ----
@@ -36,28 +36,61 @@ Done:
 [x] Redefine goal
 [x] Implement optimizers
 [x] Debug Adam
-
-
-To do (roughly ordered by what we want to do next):
---------------------------------------------------
-[ ] Reorganize/clean up code now that some things have become more stable
+[/] Reorganize/clean up code now that some things have become more stable
     - Get rid of some of the "convert-to-tspan" boilerplate
 	- Pass TSpans by value (what about RTSpans?)
 	- Let tensorunary, tensoreltwise take tensors
-[ ] RNN layer
-[ ] Embeddings layer (pre-trained?)
-    -> Load serialized layer weights?
-[ ] Fix seeding?
-[ ] Update PBT to use new Tensor stuff
+[x] Update PBT to use new Tensor stuff
     - A^T^T = A 
     - A*B = (B^T * A^T)^T
     - A[index] = A^T[back_index]
-[ ] Add special-case optimization in softmax::bp
+[x] Just have all optimizers support accumulation. Then apply_to_all_optimizers
+    to change num accums when needed. 
+	-> Get rid of that terrible protected workaround stuff?
+[x] Add block mmult support
+
+To do (roughly ordered by what we want to do next):
+--------------------------------------------------
+[ ] RNN layer
+    [ ] Controlling when acumulated weight updates are applied
+	[ ] Wrapper class around existing optimizer that is also an optimizer and does
+	    accumulations
+		-> Either that or extend the interface to optmizer classes
+	-> Idea: change update to return deltas
+	-> Provide "free function" that just tensporpluses deltas onto params
+	-> 
+	->
+[ ] Add special-case optimization <strikethrough>in softmax::bp</strikethrough>
+    for any one-hot input (e.g. in fc::ff or for embeddings)
     -> Sparsity optimization
 [/] Write the permute_indices (or transpose) function
-[ ] Save trained models
 [ ] Read model from JSON/XML/etc.
-[ ] Basic matrix ops 
+    -> In the generalized suggestion from above, we would have deserialization 
+	   methods. It's a little trickier because you can't overload based on the 
+	   return type, but I'm sure we could find some nice workaround for that.
+[ ] Save trained models
+    -> Or more generally, add serialization functions to ALL our base types, including
+	   - Tensor / TSpan / RTSpan 
+	   - layer 
+	   - activation_fn
+	   - optimizer
+	   - Model
+	  then you could also serialize all the necessary information to rebuild a Model 
+	  (including trained parameters) from a file. 
+	-> By the way, it might be better to have a free function for serialization:
+	   
+	   //This template would match all our custom types
+	   template <typename T>
+	   void serialize_to_file(FILE *fp, T const& t) {
+		   t->serialize_to_file(fp);
+	   }
+
+	   //...and we would make overloads for other types
+	   template <typename T>
+	   void serialize_to_file(FILE *fp, vector<T> const& v) {
+		   //write the vector's size followed by its data...
+	   }
+[/] Basic matrix ops 
     - Matrix addition / subtraction
 	- Scalar multiplication
 	- Generate identity?
@@ -75,10 +108,330 @@ To do (roughly ordered by what we want to do next):
 
 [ ] Write docs
 
+Needed for block tensormul:
+---------------------------
+[ ] Remove requirement that bsz divides dimensions
+[N] Can tiles be arbitrary rank?
+[ ] What about tensormuls on transposed tensors? (last stride not 1)
+[ ] Swap i and j order
+
 Cancelled:
 ----------
 
 [N] Code review the generalized layer data types 
 [N] Redesign from scratch generalized layer data
     -> Found a better solution
+[N] Fix seeding? 
+    -> I think it's fine
 
+
+Tasklets for block tensormul:
+-----------------------------
+Add in an enable_if for rank 2 times rank 2 and fill in block mamtmul logic
+Move submat into tensor.h and do any needed cleanup
+
+
+
+RNN issues
+----------
+* Want to support one-sequence-element-at-a-time (as well as whole sequence at once) at inference
+* Want batching in training (not in inference)
+
+[ ] Must we support OSEAAT in training?
+    -> No
+[ ] In OSEAAT mode, 
+    -> How do we tell RNN layer to reset its state?
+	-> How do we tell take_last when to give the last output?
+	-> How do we control when BP is run?
+	-> Idea of using NULL Tensors to act as a "sentinel"
+	-> Does Model insert NULLs or do we?
+[ ] If we do OSEAAT in training, we must at some point collect entire input sequence in order to do BP 
+[ ] Take last? Interface between "variable" and "fixed"
+    -> Variable means outer dimension of time 
+	-> Fixed means just batch x dims (where dims is dimensions of regular data)
+[ ] Sometimes error function might actually compare variable output to variable golden (e.g. predictive text; compare generated output to input shifted by one time step)
+
+
+Proposal for not forcing ff to deal with time dimension:
+--------------------------------------------------------
+ - FF is always OSEAAT 
+ - BP is always WS
+ - model::ff has new protocol where NULL Tensor indicates end of sequence 
+ - take_last takes care of converting sequences to fixed-size (e.g. if a classifier, you would have a take_last layer, but if output of model is sequence, you wouldn't have take_last)
+ - If not in "sequence mode", then none of the layers een care about NULL so just don't give it
+   -> Nonetheless, layers do need to correctly deal with NULL in case one of the layers in the model is recurrent
+
+BP implementation:
+ - Problem: If the model has a recurrent layer, it needs rank 3 matrices, but if not then it's rank 2.
+
+ - Solution 1: Only use runtime tensors in layer code. Only tensormul might try to cast to a tspan.
+    - Problem: layer implementation must work for any rank inputs. Can only use vector operations.
+    - Problem: Runtime tensor operations might be slower.
+
+ - Solution 2: Always have the time dimension, but size 1 when it's not a sequence.
+    - Problem: inconvenient to use
+
+ - Solution 3: 
+  struct layer {
+	bool sequence_mode;
+
+    bp_impl(RTSpan x, RTSpan dy) = 0; /*{
+        my_optimizer.update(x, dy);
+    }*/
+
+    bp(RTSpan x, RTSpan dy) {
+		//All layers must have some minimum reporting of expected sizes
+        if (x.rank == this->my_expected_rank() + 1) {
+            n = dy.size()
+			outputs = Tensor of size i by whatever by whatever
+            this->apply_to_all_optimizers([] {(o) o.set_num_accums(n)});
+            for (i from 0 to n-1) outputs[i] (this->bp_impl(x[i], dy[i]))
+            return outputs
+        } else {
+            return this->bp_impl(x, dy)
+        }
+    }
+ }
+ - Solution 3b: Have a "sequence-mode" instead of inferring the mode from the rank
+   -> We're still using NULLs as per the diagram, right?
+ - Solution 4: UNIX pipe model
+ - Solution 5: Instead of [Tensor -> ff -> Tensor] it's [{Tensor, int code} -> ff -> {Tensor, int code}]
+
+Proposal for preserving caching when using time:
+------------------------------------------------
+- if calling model::ff with save = true, model should collect intermediates for each time step
+   -> Otherwise, if saved = false, it just doesn't 
+- In "sequence mode", saved=true means append to saved ff outputs, instead of overwriting
+- model, as a special case, when save=true, doesn't just save final output, but also all intermediate values between layers
+- BP now has an extra arg for output of ff(x)
+   -> model gives this to BP
+- Only worth doing if it lets us get rid of save and use_saved
+
+
+Solution 3b to-do list:
+-----------------------
+[ ] Split ff and bp into public API call and protect ff_impl, bp_impl pure virtuals
+    -> Should public API call be virtual as well?
+
+
+->
+
+Summary of (extended) discussion (involving no coding at all) 
+(for the second time in a row (this is really hard I promise)) 
+on March 27:
+--------------------------------------------------------------
+Abstract:
+    Recent research has demonstrated....
+
+	
+Definitions: 
+ - Recurrent.... Has state
+ - Sequential... Has sequence index as outer dimension
+ - OSEAAT....... One sequence element at a time 
+                 - batch x feature_dim tensors (for everything except conv)
+                 - Basic recurrent models such as LSTM language models
+				 - End of sequence marker is needed (NULL Tensor?)
+ - OEAAT........ One element at a time (indistinguishable from OSEAAT from POV of layer.ff)
+                 - batch x feature_dim tensors (for everything except conv)
+                 - Current models
+ - WS........... Whole sequence 
+                 - time x batch x feature dim 
+                 - BERT
+
+
+Problem 1: We don't like forcing layers to have to check whether 
+           or not they have an extra outer dimension for the sequence 
+		   index. (In other words, "am I being used in sequential mode?
+		   If so, I need to iterate over the sequence, otherwise I just 
+		   do my usual thing").
+		   
+Problem 2: You need to collect all the intermediate states for when you 
+           do WS BP (in other words, to calculate dy_next+gradients for 
+		   time step t, you need to see the input and state at time step t)
+             
+Problem 3: a) Some models like CLDNN have a non-recurrent section followed
+              by a recurrent section. This will require some sort of
+              "unrolling" of the sequence dimension.
+		   b) BERT cannot accept OSEAAT but still is part of the "sequential"     
+              class.
+              - non-recurrent but requires rank 3 BP.
+
+Problem 4: Convolution really makes things harder with adding extra ranks
+           all over the place
+
+Idea 1:    EITHER: Split a model into a "recurrent" and "non-recurrent" section.
+           OR:     Split into "OSEAAT" and "WS" section 
+		   OR:     Split into "sequential" and "non-sequential"
+           
+Idea 1b:   "Recurrent" section contains only RNN layers - these are the only
+           layers that can take OSEAAT. They would wrap other layers like
+           fc.
+		   
+Idea 2:    SequentialModel and NonSequential model types.
+		   - Sequential ff eats OSEAAT and spits OSEAAT
+		   - Sequential bp eats WS and spits WS 
+		   - Non-sequential ff eats OEAAT and spits OEAAT (what we currently have)
+		   - Non-sequential bp eats OEAAT and spits OEAAT (what we currently have)
+           - Some glue components to connect Sequential to NonSequential and
+               vice versa.
+           - Problem: Does not support WS input like BERT.
+           
+Idea 3:    What if Models don't have two sections, but we take advantage of 
+           the fact that a Model is a layer?
+		   -> Still need to fight with glue components, but now it's harder 
+		      because the top-level model class needs to know when to use 
+			  them
+		   -> Advantage is that it's more general
+
+
+struct SeqWrapper {
+	std::unique_ptr<layer> impl;
+    std::vector<Tensor<float> > saved_outputs; // squence length x batch size x output_feature_dim
+
+	//Eats the whole sequence but iterates through so that 
+	//impl doesn't have to support a higher-rank input
+	ff(x ...) {
+		for i from 1 to n {
+			y_i = impl->ff(x[i]);
+            saved_outputs.append(y_i);
+		}
+	}
+}
+
+struct RNN {
+	std::unique_ptr<layer> impl;
+    TSpan<2, float> input_and_state; // [batch size] x [input_feature_dim + state_feature_dim]
+	                         // Always points ata right place in saved_output_and_states?
+    std::vector<Tensor<float> > saved_outputs_and_states; // [batch size] x [output_feature_dim + state_dim]
+
+	//Eats the whole sequence but iterates through so that 
+	//impl doesn't have to support a higher-rank input
+    
+    // x: [sequence_len] x [batch_size] x [input_feature_dim]
+	Tensor<float> ff(RTSpan<float> const x, bool save, bool use_saved) override {
+        input_and_state = init();
+        Tensor<float> output; // [sequence_len] x [batch size] x [output_feature_dim]
+
+		for i from 1 to n {
+			//let q = concat{x[i], input_and_state}
+            copy x[i] into input_and_state[,input_feature_dim:]
+			Tensor<float> output_and_state = impl->ff(input_and_state); // [batch_size] x [output_feature_dim + state_dim]
+            
+            if(save) saved_outputs_and_states.push_back(output_and_state); // copy
+
+            copy output_and_state[,:output_feature_dim] to output[i]
+            copy output_and_state[,output_feature_dim:] to mystate[,input_feature_dim:]
+		}
+	}
+
+	Tensor<float> bp(RTSpan<float> const x, RTSpan<float> const dy, bool use_saved) {
+		//Proposal: also pass in RTSpan<float> y as a parameters, instead of use_saved
+	}
+}
+
+//Wrap layer in SeqWrapper for training, but don't for inference 
+//-> still needs that end-of-sequence indicator (a.k.a. NULL tensor)
+
+Tasklets
+--------
+[ ] Implement RNN class such that it supports "regular sequence wrapping"
+    -> Constructor parameter for state vector length
+	-> Handling concats and splits 
+	   M has size (output_size + state_len) x (input_size + state_len)
+	   M1 has size (output_size + state_len) x input_size 
+	   M2 has size (output_size + state_len) x state_len
+	   M*concat(x,y) = M1*x + M2*y, where M = concat(M1, M2)
+
+
+
+Proposal for eliminating extra copy of intermediate tensors in model 
+--------------------------------------------------------------------
+Instead of having each layer copy its ff output, and then having the 
+model destroy its copy after passing it as input to the next layer, 
+we would just have model hang onto the intermediate output. The reason 
+this extra copy exists is because ff has to return a Tensor (and not 
+a TSpan).
+
+ - One nice thing: because Model stores all intermediate values between 
+   layers, we can (for free) give both x and y to backprop (instead of 
+   just x, which is what we currently do. In more detail, we give x, 
+   and layers can call their own ff to recompute y, and we expect ff 
+   to cache y so that we don't redo ff)
+
+ - This probably means removing save and use_saved in the layers?
+
+ - For RNN, model stores the outputs but the layer still stores the states
+
+ - problem: model needs a different interface than layers, which means model
+   can't be a layer, and we can't do hierarchical models.
+   - Here's why: suppose we have a model (top) that has several layers, one of
+     which is also a model (sub). When the user of the model calls top.ff, they 
+	 will set save to true to tell top to save intermediate Tensors so that they 
+	 can be reused when use_saved is given as true in top.bp. However, because 
+	 top is saving all the intermediates, there's really no need for each layer 
+	 to also save them, so top would just set save to false when it calls ff on 
+	 all its layers. But, this means that sub.ff has save = false, and when we 
+	 do sub.bp, it goes and recomputes all its ffs. 
+
+	 top Model
+	 +----------+------------+---------+---------------------------------+
+	 |  Layer 1 |  sub Model | Layer 2 | etc...                          | 
+	 +----------+------------+---------+---------------------------------+
+
+	 -> What if we have three booleans:
+	    -> save_outputs 
+		-> save_inner 
+		-> use_saved
+
+	                  | Normal Layer                   |  top Model                    |  sub Model 
+(old) save_outputs    | Saves y = ff(x)                |  saves y = final model output |  saves y = final model output
+(new) save_inner      | No effect                      |  saves intermediate tensors   |  saves intermediate tensors
+	  use_saved       | Return saved y                 |  uses intermediate tensors    |  uses intermediate tensors
+      use_saved_inner |
+https://excalidraw.com/#json=5766970154680320,HRuET7OvpudW36C5_1ee-A
+
+     +----------------------------------------------------------------------+
+     | Top model                                                            |
+     | saved: Layer 1 output, sub-model output, Layer 2 output              |
+	 +------------+-------------------+------------+------------------------+
+     |  Layer 1   | Sub-model         | Layer 2    |                        |
+	 |  saved:    | saved: O1, O2, O3 | saved:     | etc...                 | 
+	 +------------+-------------------+------------+------------------------+
+	
+	If we were to do an in-order traversal of all saved quantities, it would be 
+	the same as if we had flattened the model (in other words, don't have a submodel
+	and just paste all its layers into the top model at the right place)
+
+	If the model is going to start saving layer outputs, we don't need layers to 
+	save them anymore. So models always set save_outputs to false.
+
+	Since layers never save their own output, just get rid of the save_outputs 
+	Boolean (which is currently called "save").
+
+	Still have to include y in the bp arguments.
+    - bp takes use_saved, but now this means to use saved intermediate/inner values 
+	  -> Because if we have a sub-model, that sub-model should re-use its saved intermediates 
+	     becasue it needs to gie the x and y arguments to bp on each of its own layers. 
+	  -> This also applies to the case where we implement a new layer (e.g. LSTM) by composing 
+	     other layers (in the LSTM case, three fcs).
+    - ff does not need use_saved. If a layer wants a sub-layer to use saved, the layer
+        just uses the saved output instead of calling sub_layer->ff.
+
+
+Proposal for RNN implementation
+-------------------------------
+
+
+
+
+Note to self 
+------------
+It might not be a coincidence that bp always ends up computing its own ff. Maybe 
+there's an easier way to derive the bp expressions? A deeper force is at play...
+
+
+Tasklets for new+improved caching vis-à-vis tress of layers 
+-----------------------------------------------------------
+[ ] Go in and implement new semantics for save and use_saved 
+[x] Add support in Model to cache intermediates 
+[x] add y param to bp
