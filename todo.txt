@@ -13,6 +13,7 @@ Done:
     - <strikethrough>Copter</strikethrough>
     - <strikethrough>TensorChopper</strikethrough>
     - TensorCopter 👌👌👌👌👌👌👌
+	- TensorCopter Advanced
 [x] Softmax layer
 [x] Figure out why training is slow (cause it is)
 [x] Figure out why training gets ~10x faster after ~100 batches
@@ -48,9 +49,21 @@ Done:
     to change num accums when needed. 
 	-> Get rid of that terrible protected workaround stuff?
 [x] Add block mmult support
+[x] Convert the spl's to upl's
+[x] Add TSpan deep copy
+[x] Allowing ff and bp to save results in place (rather than construct new tensor)
+    - Idea: two ff functions, one of them called ff_inplace
+	- ff's default can just call ff_inplace after creating a new tensor for results
+	  -> Might be tricky because need to know result tensor's size
+	  -> Layers might need to be able to report needed output size
+	- layers only implement ff_inplace
 
 To do (roughly ordered by what we want to do next):
 --------------------------------------------------
+[ ] Tensor concat
+[ ] Fix SeqAdapter WS mode to use in-place stuff
+[ ] Improve that model validation sutff (can_accept and num_outputs)
+    -> Goes hand-in-hand with reporteing needed tensor size in above todo item
 [ ] RNN layer
     [ ] Controlling when acumulated weight updates are applied
 	[ ] Wrapper class around existing optimizer that is also an optimizer and does
@@ -58,12 +71,6 @@ To do (roughly ordered by what we want to do next):
 		-> Either that or extend the interface to optmizer classes
 	-> Idea: change update to return deltas
 	-> Provide "free function" that just tensporpluses deltas onto params
-	-> 
-	->
-[ ] Add special-case optimization <strikethrough>in softmax::bp</strikethrough>
-    for any one-hot input (e.g. in fc::ff or for embeddings)
-    -> Sparsity optimization
-[/] Write the permute_indices (or transpose) function
 [ ] Read model from JSON/XML/etc.
     -> In the generalized suggestion from above, we would have deserialization 
 	   methods. It's a little trickier because you can't overload based on the 
@@ -90,6 +97,10 @@ To do (roughly ordered by what we want to do next):
 	   void serialize_to_file(FILE *fp, vector<T> const& v) {
 		   //write the vector's size followed by its data...
 	   }
+[ ] Add special-case optimization <strikethrough>in softmax::bp</strikethrough>
+    for any one-hot input (e.g. in fc::ff or for embeddings)
+    -> Sparsity optimization
+[/] Write the permute_indices (or transpose) function
 [/] Basic matrix ops 
     - Matrix addition / subtraction
 	- Scalar multiplication
@@ -110,10 +121,10 @@ To do (roughly ordered by what we want to do next):
 
 Needed for block tensormul:
 ---------------------------
-[ ] Remove requirement that bsz divides dimensions
+[x] Remove requirement that bsz divides dimensions
 [N] Can tiles be arbitrary rank?
-[ ] What about tensormuls on transposed tensors? (last stride not 1)
-[ ] Swap i and j order
+[x] What about tensormuls on transposed tensors? (last stride not 1)
+[?] Swap i and j order
 
 Cancelled:
 ----------
@@ -123,12 +134,6 @@ Cancelled:
     -> Found a better solution
 [N] Fix seeding? 
     -> I think it's fine
-
-
-Tasklets for block tensormul:
------------------------------
-Add in an enable_if for rank 2 times rank 2 and fill in block mamtmul logic
-Move submat into tensor.h and do any needed cleanup
 
 
 
@@ -284,7 +289,7 @@ Idea 3:    What if Models don't have two sections, but we take advantage of
 		   -> Advantage is that it's more general
 
 
-struct SeqWrapper {
+struct SeqAdapter : layer {
 	std::unique_ptr<layer> impl;
     std::vector<Tensor<float> > saved_outputs; // squence length x batch size x output_feature_dim
 
@@ -322,6 +327,8 @@ struct RNN {
             copy output_and_state[,:output_feature_dim] to output[i]
             copy output_and_state[,output_feature_dim:] to mystate[,input_feature_dim:]
 		}
+
+        return output;
 	}
 
 	Tensor<float> bp(RTSpan<float> const x, RTSpan<float> const dy, bool use_saved) {
@@ -420,7 +427,8 @@ https://excalidraw.com/#json=5766970154680320,HRuET7OvpudW36C5_1ee-A
 
 Proposal for RNN implementation
 -------------------------------
-
+The idea is to put a wrapper around any non-sequential layer. This wrapper takes 
+care of "unrolling" the time dimension, or handling NULL tensors in OSEAAT mode. 
 
 
 
@@ -432,6 +440,22 @@ there's an easier way to derive the bp expressions? A deeper force is at play...
 
 Tasklets for new+improved caching vis-à-vis tress of layers 
 -----------------------------------------------------------
-[ ] Go in and implement new semantics for save and use_saved 
+[x] Go in and implement new semantics for save and use_saved 
 [x] Add support in Model to cache intermediates 
 [x] add y param to bp
+
+
+Tasklets for SeqAdapter
+-----------------------
+[ ] Figure out:
+    - Who applies the adapter? When?
+	- When is the adapter applied? Is it always applied?
+	- Do we have different adapters, or one universal one?
+	  - typedef enum {OEAAT, OSEAAT, WS} layer_type;
+	  - Adapter keeps track of layer type inside of it, 
+	    and has public virtual function to set what mode 
+		to use
+[ ] Write the SeqAdapter struct
+[ ] Apply the necessary changes to the Model class 
+[ ] Write the "baby's first" RNN layer 
+    - 

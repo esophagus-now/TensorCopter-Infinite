@@ -16,42 +16,38 @@
 
 
 template <int rank>
-struct perturbator : ctr_layer<rank> {
+struct perturbator : ctr_layer<rank,rank> {
 	std::default_random_engine gen;
 	float t;
 
 	perturbator(float t) : t(t) {}
 
-	Tensor<float> ctr_ff(TSpan<rank, float> x, bool=false) override {
+    virtual std::vector<int> ff_result_sz(int x_rank, int const *x_dims) const override {
+        std::vector<int> ret(x_rank);
+        std::copy(x_dims, x_dims + x_rank, ret.data());
+        return ret;
+    }
+
+	void ctr_ff(TSpan<rank, float> x, TSpan<rank, float> y, bool=false) override {
 		std::uniform_real_distribution dist(-t, t);
 
-		Tensor<float> ret_storage(x);
-		auto ret = ret_storage.as_tspan<rank>();
-
 		tensorunary(
-			ret, ret,
+			y, y,
 			[&] (float x) -> float {return x + dist(gen);}
 		);
-
-		return ret;
 	}
 
-	Tensor<float> ctr_bp(
+	void ctr_bp(
 		TSpan<rank, float> x, TSpan<rank, float> y, TSpan<rank, float> dy, 
-	    bool=false
+	    TSpan<rank, float> dx, bool=false
 	) override {
-		Tensor<float> ret(dy);
-		return ret;
-	}
-
-	int num_outputs(int num_inputs) const override {
-		return num_inputs;
+		dy.deep_copy_to(dx);
 	}
 
 };
 
 //fully connected
-struct fc : ctr_layer<2> {
+struct fc : ctr_layer<2,2> {
 	//static_assert(rank == 2, "This does not currently support other ranks");
     // W: (num outputs) x (num inputs)
     // bias: (num outputs)
@@ -108,29 +104,39 @@ struct fc : ctr_layer<2> {
             fc(n_out, n_in, act_fn, weight_optimizer, bias_optimizer, gen_name())
         {}
 
+    std::vector<int> ff_result_sz(int x_rank, int const *x_dims) const override {
+        if (x_rank != 2)
+            throw std::runtime_error("fc canont accept input of rank " + std::to_string(x_rank));
+        if (x_dims[1] != W.dims[1])
+            throw std::runtime_error("fc with weight dimension " + std::to_string(x_rank) 
+                        + " cannot accept input of dimension " + std::to_string(x_rank));
+        return std::vector<int>({x_dims[0], W.dims[0]});
+    }
+
     //feed-forward
     //Note to our future selves: this does x * transpose(W)
     // W: (num outputs) x (num inputs)
     // x: (batch size) x (num inputs)
     // ret: (batch size) x (num outputs)
-    Tensor<float> ctr_ff(TSpan<2,float> x, bool save=false) override {
+    void ctr_ff(TSpan<2,float> x, TSpan<2,float> y, bool save=false) override {
         assert(x.dims[1] == W.dims[1]);
 
         auto W_T = W.transpose();
 
-        auto ret_storage = tensormul(x, W_T);
-		auto ret = ret_storage.as_tspan<2>();
-        //std::cout << "tensormul result: " << ret << std::endl;
-        assert(ret.length() == x.length());
-        assert(ret.dims[1] == bias.dims[0]);
+		assert(y.dims[0] == x.dims[0]);
+		assert(y.dims[1] == W.dims[0]);
 
-        for (int i = 0; i < ret.length(); i++) { //batch size
-            for (int j = 0; j < ret[i].length(); j++) { //number of outputs
-                ret[i][j] = (*act_fn)(ret[i][j] + bias[j]);
+        tensormul(x, W_T, y);
+		
+        //std::cout << "tensormul result: " << y << std::endl;
+        assert(y.length() == x.length());
+        assert(y.dims[1] == bias.dims[0]);
+
+        for (int i = 0; i < y.length(); i++) { //batch size
+            for (int j = 0; j < y[i].length(); j++) { //number of outputs
+                y[i][j] = (*act_fn)(y[i][j] + bias[j]);
             }
         }
-
-        return ret;
     }
 
     //backprop
@@ -144,12 +150,19 @@ struct fc : ctr_layer<2> {
     // That means dErr/dW = (dD/dB)^T = (dErr/dy)^T * x
     // and dErr/dx = (dD/dA) = (dErr/dy)*W
     // and dErr/dbias = (dD/dC) = (dErr/dy)
-    Tensor<float> ctr_bp(TSpan<2, float> x, TSpan<2, float> z, TSpan<2, float> dy,
-                         bool use_saved = false) override {
+    void ctr_bp(
+		TSpan<2, float> x, 
+		TSpan<2, float> z, 
+		TSpan<2, float> dy,
+		TSpan<2, float> dx,
+        bool use_saved = false
+	) override {
         assert(x.dims[1] == W.dims[1]);
         assert(dy.dims[0] == x.dims[0]);
         assert(dy.dims[1] == W.dims[0]);
         assert(bias.dims[0] == dy.dims[1]);
+		assert(dx.dims[0] == x.dims[0]);
+		assert(dx.dims[1] == x.dims[1]);
 
 		//Technically need to remake iterators every time,
 		//because (in theory) W and bias could be re-allocated
@@ -180,9 +193,9 @@ struct fc : ctr_layer<2> {
         Tensor<float> dErr_dW_storage = tensormul(z2_T, x); // (num outputs) x (num inputs)
 		auto dErr_dW = dErr_dW_storage.as_tspan<2>();
 
-        Tensor<float> dErr_dx = tensormul(z2, W); // (num batches) x (num inputs)
+        tensormul(z2, W, dx); // (num batches) x (num inputs)
     	assert(std::equal(dErr_dW.dims, dErr_dW.dims+2, W.dims));
-        assert(std::equal(dErr_dx.dims.data(), dErr_dx.dims.data()+2, x.dims));
+        assert(std::equal(dx.dims.data(), dx.dims.data()+2, x.dims));
         //dErr_dbias = dy
 
         weight_optimizer->update_tspan(W, dErr_dW);
@@ -199,17 +212,15 @@ struct fc : ctr_layer<2> {
 		}
 
         bias_optimizer->update_tspan(bias, bias_grad);
-
-        return dErr_dx;
     }
 
-	virtual int num_outputs(int num_inputs) const override {
-		return W.dims[0];
-	}
+	// virtual int num_outputs(int num_inputs) const override {
+	// 	return W.dims[0];
+	// }
     
-    virtual bool can_accept(int num_inputs) const override {
-		return num_inputs == W.dims[1]; 
-	}
+    // virtual bool can_accept(int num_inputs) const override {
+	// 	return num_inputs == W.dims[1]; 
+	// }
 
     void dump(std::ostream& o) const override {
         o << "{\"" << name << "\": {\n";
@@ -228,11 +239,22 @@ struct fc : ctr_layer<2> {
 };
 
 struct softmax : layer {
+
+    virtual std::vector<int> ff_result_sz(int x_rank, int const *x_dims) const override {
+        if (x_rank != 2) {
+            throw std::runtime_error("softmax cannot accept inputs of rank " + std::to_string(x_rank));
+        }
+        std::vector<int> ret(x_rank);
+        std::copy(x_dims, x_dims + x_rank, ret.data());
+        return ret;
+    }
+
     //feed-forward
-    Tensor<float> ff(RTSpan<float> x, bool=false) override {
+    void ff(RTSpan<float> x, RTSpan<float> y, bool=false) override {
+        assert(std::equal(x.dims, x.dims + x.rank, y.dims, y.dims + y.rank));
+        //TODO: use ctr_layer instead
 		auto x_it = x.as_tspan<2>();
-		Tensor<float> ret(x.dims, 2);
-		auto ret_it = ret.as_tspan<2>();
+        auto y_it = y.as_tspan<2>();
 
 		for (int i = 0; i < x_it.dims[0]; i++) {
 			float max = x_it[i][0];
@@ -244,36 +266,45 @@ struct softmax : layer {
 			
             float sum = 0.0f;
 			for (int j = 0; j < x_it.dims[1]; j++) {
-				ret_it[i][j] = exp(x_it[i][j] - max);
-                assert(!std::isinf(ret_it[i][j]));
-                assert(!std::isnan(ret_it[i][j]));
-				sum += ret_it[i][j];
+				y_it[i][j] = exp(x_it[i][j] - max);
+                assert(!std::isinf(y_it[i][j]));
+                assert(!std::isnan(y_it[i][j]));
+				sum += y_it[i][j];
 			}
             assert(sum > 1e-8);
 			for (int j = 0; j < x_it.dims[1]; j++) {
-				ret_it[i][j] /= sum;
-                assert(ret_it[i][j] >= 0);
+				y_it[i][j] /= sum;
+                assert(y_it[i][j] >= 0);
 			}
 		}
-		
-		return ret;
 	}
 
     //backprop
     // x: (batch size) x (num inputs)
     // dy: (batch size) x (num outputs)
-    // ret: (batch size) x (num inputs)
+    // dx: (batch size) x (num inputs)
     // num inputs = num outputs
     // For a single example, derivative of y_j with respect to x_k = 
     //  y_j * (1 - y_j) = -y_j * y_j + y_j      if j == k
     //  - y_j * y_k                             if j != k
 	// and all of that averaged over the batch size
-    Tensor<float> bp(RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
-                     bool=false) override {
+    void bp(
+        RTSpan<float> x, 
+        RTSpan<float> y, 
+        RTSpan<float> dy,
+        RTSpan<float> dx,
+        bool=false
+    ) override {
         assert(x.dims[1] == dy.dims[1]);
 
+		//TODO: change softmax to use ctr_layer
 		auto x_it = x.as_tspan<2>();
+		auto y_it = y.as_tspan<2>();
 		auto dy_it = dy.as_tspan<2>();
+		auto dx_it = dx.as_tspan<2>();
+
+		assert(dx.dims[0] == x.dims[0]);
+		assert(dx.dims[1] == x.dims[1]);
 
 		//if we notice that dy is one hot
 		//	do the speical case instead
@@ -281,13 +312,8 @@ struct softmax : layer {
 		//This line deleted when we got rid of layers saving their own 
 		//outputs.
         //auto y = ff(x);
-		auto y_it = y.as_tspan<2>();
         // (num inputs) x (num outputs)
         int jacobian_dims[2] = {x.dims[1], y_it.dims[1]};
-        
-		//Size of return is always the same as size of input
-		Tensor<float> ret(x.dims, 2);
-		auto ret_it = ret.as_tspan<2>();
 
         // For each example in batch
         for (int i = 0; i < x_it.dims[0]; i++) {
@@ -306,7 +332,7 @@ struct softmax : layer {
             // (num inputs) x (num outputs)
             
             Tensor<float> jacobian(jacobian_dims, 2);
-			auto jac_it = jacobian.as_tspan<2>(); //ha-ha
+			auto jac_it = jacobian.as_tspan<2>();
 
 			//J = -y[i]^T * y[i] + \mathrm{diag}(y[i])
 			
@@ -317,23 +343,15 @@ struct softmax : layer {
 				}
 			}
 
-            // ret[i] = dErr/(dy[i]) = tensormul(derivative, dy[i]);
+            // dx[i] = dErr/(dy[i]) = tensormul(derivative, dy[i]);
 			// Thank god we did this the right way in the first place
-            tensormul(jac_it, dy_it[i], ret.as_tspan<2>()[i]);
-				//Sometimes C++ can have real WTF syntax...
+            tensormul(jac_it, dy_it[i], dx_it[i]);
         }
-		
-		return ret;
     }
-	
-	//Default can_accept is suitable
-
-	virtual int num_outputs(int num_inputs) const override {
-		return num_inputs;
-	}
 };
 
 #if 0
+//TODO: needs to look like new layer interface
 struct RNN {
 	std::unique_ptr<layer> impl;
 

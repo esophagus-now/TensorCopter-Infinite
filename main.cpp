@@ -59,76 +59,164 @@ ostream& operator<<(ostream &o, shared_ptr<T> const& p) {
     }
 }
 
-class Model : layer {
+//Supported modes of operation:
+// name| We get called in mode  |  impl is in mode | Implement? (Y/N) 
+//-------------------------------------------------------------------
+//  A  |         OEAAT          |     OEAAT        |       N
+//  B  |         OEAAT          |     OSEAAT       |       N
+//  C  |         OEAAT          |     WS           |       N
+//  D  |         OSEAAT         |     OEAAT        |       Y
+//  E  |         OSEAAT         |     OSEAAT       |       N
+//  F  |         OSEAAT         |     WS           |       N
+//  G  |         WS             |     OEAAT        |       Y
+//  H  |         WS             |     OSEAAT       |       N
+//  I  |         WS             |     WS           |       N
+//
+// Notes:
+// Case F: doesn't make sense: once adapter accumulates and calls ff, it
+//         has to output a whole sequence to the next layer, which is 
+//         expecting OSEEAT
+// Cases E and I: _could_ implement (they would just pass through directly)
+//                but for nwo there's nothing telling us to do it
+
+#if 0
+
+struct SeqAdapter : layer {
+    std::unique_ptr<layer> impl; //always OEAAT
+	layer_mode my_input_mode;
+
+	SeqAdapter(std::unique_ptr<layer> l) : impl(std::move(l)) {
+        assert(impl->set_mode(layer_mode::OEAAT));
+    }
+
+    Tensor<float> ff(RTSpan<float> x, bool save = false) override {
+		if (my_input_mode == layer_mode::WS) {
+			//Iterate through, collect outputs into one final tensor and return
+			//Problem: how big is that final tensor?
+			int seq_len = x.length();
+			assert(seq_len > 0);
+			
+			std::vector<Tensor<float>> output_seq;
+			for (int i = 0; i < seq_len; i++) {
+				output_seq.push_back(impl->ff(x[i], false));
+			}
+			
+            assert(!output_seq.empty());
+            assert(std::all_of(output_seq.begin(), output_seq.end(), 
+                [&](Tensor<float> const& elem){
+                    return elem.dims == output_seq[0].dims;
+                })
+			);
+			int *output_dims = new int[output_seq[0].rank + 1];
+
+			output_dims[0] = seq_len;
+			std::copy(output_seq[0].dims.begin(), output_seq[0].dims.end(), output_dims + 1);
+
+			//Note to self: left off here
+			//Need to create output tensor and split into RTSpans,
+			//then need function to copy one RTSpan's data to another
+
+		} else if (my_input_mode == layer_mode::OSEAAT) {
+			//if (!x) return nullTensor;
+		} else {
+			assert(0 && "Somehow my input mode was set wrong");
+			return Tensor<float>(); //To keep the compiler happy
+		}
+	}
+
+    Tensor<float> bp(RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
+                     bool use_saved = false, RTSpan<float> dx) override 
+	{
+		return Tensor<float>();
+	}
+
+	//For model validation
+	//SLATED FOR DELETION
+	//bool can_accept(int num_inputs) const override { return impl->can_accept(num_inputs); }
+    //int num_outputs(int num_inputs) const override { return impl->num_outputs(num_inputs); }
+
+    //For debugging
+	//TODO: add debug note about being in an adapter?
+    void dump(std::ostream &o) const override  { impl->dump(o); }
+
+    bool set_mode(layer_mode mode) override {
+        if (mode == layer_mode::OEAAT) 
+            return false;
+		my_input_mode = mode;
+        return true;
+	}
+};
+
+#endif
+
+class Model : public layer {
 
 public:
-    std::vector<shared_ptr<layer> > layers;
+    std::vector<unique_ptr<layer> > layers;
     std::vector<Tensor<float>> layer_outputs;
 
     Model() {}
 
-    Tensor<float> ff_impl(RTSpan<float> x, bool save,
-                          std::vector<Tensor<float>>& to_save) {
+    std::vector<int> ff_result_sz(int x_rank, int const *x_dims) const override {
+        std::vector<int> cur_dims(x_rank);
+        std::copy(x_dims, x_dims + x_rank, cur_dims.data());
+        for (auto const& layer : layers) {
+            cur_dims = layer->ff_result_sz(cur_dims.size(), cur_dims.data());
+        }
+        return cur_dims;
+    }
+
+    void ff_impl(RTSpan<float> x, RTSpan<float> y, bool save,
+                std::vector<Tensor<float>>& to_save) {
 
         assert(layers.size() > 0);
         if (layers.size() == 1) {
 			//There's nothing to save
-            return layers[0]->ff(x, save);
+            layers[0]->ff(x, y, save);
         }
 
 		//Do the first layer. Separate case becasue uses x param
         Tensor<float> cur; //Never used if save is true
 		                   //to_save never modified if save is false
-        int cur_dims;
         if (save) {
             to_save.clear();
-            to_save.push_back(layers[0]->ff(x, save));
-            cur_dims = to_save.back().dims.back();
+            to_save.push_back(layers[0]->ff_alloc(x, save));
         } else {
-            cur = layers[0]->ff(x, save);
-            cur_dims = cur.dims.back();
+            cur = layers[0]->ff_alloc(x, save);
 		}
 
 		//Do last n-2 layers
         for (int layer_num = 1; layer_num < static_cast<int>(layers.size())-1; layer_num++) {
-            auto l = layers[layer_num];
-            if (!l->can_accept(cur_dims)) {
-                throw std::runtime_error(
-					"Invalid model: layer " + 
-					std::to_string(layer_num) + 
-                	" cannot accept inputs of dimension " + 
-					std::to_string(cur_dims)
-				);
-            }
-            cur_dims = l->num_outputs(cur_dims);
+            auto l = layers[layer_num].get();
 
             if (save)
-                to_save.push_back(l->ff(&to_save.back(), save));
+                to_save.push_back(l->ff_alloc(&to_save.back(), save));
             else
-               cur = l->ff(&cur, save);
+               cur = l->ff_alloc(&cur, save);
         }
         
 		//And the final one, separate because we don't save the outputs 
 		//either way, but still need to check whether we are using cur
         if (save)
-            return layers.back()->ff(&to_save.back(), save);
+            layers.back()->ff(&to_save.back(), y, save);
         else
-            return layers.back()->ff(&cur, save);
+            layers.back()->ff(&cur, y, save);
     }
 
     //feed-forward
-    Tensor<float> ff(RTSpan<float> x, bool save=false) override {
-        return ff_impl(x, save, layer_outputs);
+    void ff(RTSpan<float> x, RTSpan<float> y, bool save=false) override {
+        ff_impl(x, y, save, layer_outputs);
     }
 
     //backprop
-    Tensor<float> bp(RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
-                     bool use_saved=false) override {
-        //Subtle bug: this used to be a vector of MSpans, but
-        //then you get dangling pointers. This was happening 
-        //because the actual result of running ff (see about 8-9
-        //lines lower down) was being discarded but we were still
-        //saving an MSpan into that matrix into the vector
+    void bp(
+		RTSpan<float> x, 
+		RTSpan<float> y, 
+		RTSpan<float> dy,
+		RTSpan<float> dx, //output is written here
+        bool use_saved=false
+	) override {
+        assert(std::equal(x.dims, x.dims + x.rank, dx.dims));
 
 		std::vector<Tensor<float>> newly_computed; //Not always used
 
@@ -137,7 +225,8 @@ public:
 		//fenceposts = {x, layer_outputs[1 .. n-1] , y}
 		fenceposts.push_back(x);
         if (!use_saved) {
-			ff_impl(x, true, newly_computed);
+            Tensor<float> temp(ff_result_sz(x.rank, x.dims));
+			ff_impl(x, &temp, true, newly_computed);
 			for (unsigned i = 0; i < newly_computed.size(); i++) {
 				fenceposts.push_back(&newly_computed[i]);
 			}
@@ -156,31 +245,49 @@ public:
 
 		assert(fenceposts.size() == 1 + (layers.size() - 1) + 1);
 
-		for (int i = fenceposts.size() - 1 - 1; i >= 0; i--){
+        int i;
+		for (i = fenceposts.size() - 1 - 1; i > 0; i--){
 			DEBUG("before_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
 			DEBUG("bp_inputs[" + to_string(i) + "]", ::dump(fenceposts[i]));
 			DEBUG("bp_dy_in[" + to_string(i) + "]", ::dump(&cur_dy));
 			
-			cur_dy = layers[i]->bp(fenceposts[i], fenceposts[i+1], &cur_dy, use_saved);
+			cur_dy = layers[i]->bp_alloc(fenceposts[i], fenceposts[i+1], &cur_dy, use_saved);
 
 			DEBUG("after_bp[" + to_string(i) + "]", ::dump(*(layers[i])));
 			DEBUG("bp_outputs[" + to_string(i) + "]", ::dump(&cur_dy));
 		}
-
-		return cur_dy;
+        
+        //i is now 0 at this point
+        layers[i]->bp(fenceposts[i], fenceposts[i+1], &cur_dy, dx, use_saved);
     }
 
     // void append_fc_layer(int r, int c, activation_fn *act) {
     //     layers.push_back(make_shared<fc>(r, c, act));
     // }
 
-    void add_layer(std::shared_ptr<layer> pl) {
-        layers.push_back(pl);
+    void add_layer(std::unique_ptr<layer> pl) {
+        layers.push_back(std::move(pl));
     }
 
     /*void add_layer(layer &&l) {
         layers.push_back(std::make_shared<layer>(l));
     }*/
+	
+	bool set_mode(layer_mode mode) override {
+		/*for (std::unique_ptr<layer> & upl : layers) {
+			bool succeeded = upl->set_mode(mode);
+			if (!succeeded) {
+				//Try wrapping
+                upl = std::make_unique<SeqAdapter>(std::move(upl));
+				succeeded = upl->set_mode(mode);
+				if (!succeeded) {
+					throw runtime_error("I was not able to convert the given layer");
+				}
+			}
+		}*/
+
+		return true;
+	}
 };
 
 ofstream debug_out;
@@ -197,7 +304,7 @@ double evaluate_mnist(Model& model, const std::vector<tpair>& examples) {
 
     for (const auto& example : examples) {    
         Tensor<float> input_mat(example.first, input_mat_dims, 2); //1x784
-		Tensor<float> output_mat = model.ff(&input_mat);        //1x10
+		Tensor<float> output_mat = model.ff_alloc(&input_mat);        //1x10
 
 		//Find out the real answer, and what the model answers
 		int max_ind = 0;
@@ -235,10 +342,10 @@ Model train_mnist(std::vector<tpair> examples) {
     constexpr float lr = 0.001;
     Model model;
 	//model.add_layer(make_shared<perturbator<2> >(0.015));
-    model.add_layer(make_shared<fc>(128, input_dim, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
-	model.add_layer(make_shared<fc>(64, 128, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
-    model.add_layer(make_shared<fc>(output_dim, 64, new identity(), new Adam<2>(lr), new Adam<1>(lr)));
-    model.add_layer(make_shared<softmax>());
+    model.add_layer(make_unique<fc>(128, input_dim, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
+	model.add_layer(make_unique<fc>(64, 128, new oddln(), new Adam<2>(lr), new Adam<1>(lr)));
+    model.add_layer(make_unique<fc>(output_dim, 64, new identity(), new Adam<2>(lr), new Adam<1>(lr)));
+    model.add_layer(make_unique<softmax>());
 
     auto e = nll(); //sqerr();
     float last_cost = -1.0; //Some impossible cost to make sure we don't
@@ -284,7 +391,7 @@ Model train_mnist(std::vector<tpair> examples) {
             Tensor<float> expected_outputs(std::move(expected_output_data), output_dims, 2);
 
             last_cost = cost;
-            output = model.ff(&batch_inputs, true);
+            output = model.ff_alloc(&batch_inputs, true);
 
             cost = e.cc(&output, &expected_outputs);
 
@@ -292,7 +399,7 @@ Model train_mnist(std::vector<tpair> examples) {
 
             auto gradient = e.gg(&output, &expected_outputs);
 
-            model.bp(&batch_inputs, &output, &gradient, true);
+            model.bp_alloc(&batch_inputs, &output, &gradient, true);
 
             batch_start_idx += this_batch_size;
         }
@@ -316,7 +423,7 @@ Model train_mnist(std::vector<tpair> examples) {
 	auto it = model.layers.begin();
 	while (it != model.layers.end()) {
 		bleh++;
-		if (std::dynamic_pointer_cast<perturbator<2> >(*it)) {
+		if (dynamic_cast<perturbator<2> *>(it->get())) {
 			cout << "Erasing layer " << bleh << el;
 			it = model.layers.erase(it);
 		} else ++it;

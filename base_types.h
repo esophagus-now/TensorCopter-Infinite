@@ -153,22 +153,41 @@ struct compiletime_rank_optimizer_wrapper : compiletime_rank_optimizer<rank> {
 	}
 };
 
+enum class layer_mode {
+	OEAAT,  //One element at-a-time
+	OSEAAT, //One sequence element at-a-time
+	WS      //Whole sequence
+};
+
 //template <typename T = float> //<- Try this sometime in the future?
 struct layer {
     virtual ~layer() {}
 
     //feed-forward
-    virtual Tensor<float> ff(RTSpan<float> x, bool save = false) = 0;
+    Tensor<float> ff_alloc(RTSpan<float> x, bool save = false) {
+		Tensor<float> ret(this->ff_result_sz(x.rank, x.dims));
+		this->ff(x, &ret, save);
+		return ret;
+	}
+
+    virtual void ff(RTSpan<float> x, RTSpan<float> y, bool save = false) = 0;
+	virtual std::vector<int> ff_result_sz(int x_rank, int const *x_dims) const = 0;
 
     //backprop
-	//use_saved only applies to the most recent call to ff, which may have 
-	//happened as a result of calling bp
-    virtual Tensor<float> bp(RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
-                             bool use_saved = false) = 0;
+    Tensor<float> bp_alloc(
+		RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
+        bool use_saved = false
+	) {
+		Tensor<float> ret(x.dims, x.rank);
+		this->bp(x, y, dy, &ret, use_saved);
+		return ret;
+	}
 
-	//For model validation
-	virtual bool can_accept(int num_inputs) const {return true;}
-    virtual int num_outputs(int num_inputs) const {return -1;}
+    virtual void bp(
+		RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
+		RTSpan<float> dx,
+        bool use_saved = false
+	) = 0;
 
 	//Used if this layer is used inside an RNN
 	virtual void apply_to_all_optimizers (
@@ -179,29 +198,58 @@ struct layer {
 
     //For debugging
     virtual void dump(std::ostream &o) const { o << "\"(does not support dumping)\""; }
+
+	//Return value: if false, it tells model that we need to be wrapped 
+	//in an adapter. Layers like transformor or RNN can override and return 
+	//true to prevent getting wrapped (return value indicates succesfully 
+	//changed mode)
+	virtual bool set_mode(layer_mode mode) {
+		//Default works for OEAAT layers
+		if (mode == layer_mode::OEAAT) return true;
+		else return false;
+	}
 };
 
 //Helps eliminate some boilerplate for compile-time rank layers
-template <int rank>
+template <int xrank, int yrank>
 struct ctr_layer : layer {
-	Tensor<float> ff(RTSpan<float> x, bool save = false) override {
+	void ff(RTSpan<float> x, RTSpan<float> y, bool save = false) override {
 		//Check if rank of given x is one more than rank template parameter;
 		//if so, iterate outer dimension
-		return ctr_ff(x.as_tspan<rank>(), save);
+		return ctr_ff(x.as_tspan<xrank>(), y.as_tspan<yrank>(), save);
 	}
 	
-    Tensor<float> bp(
-		RTSpan<float> x, RTSpan<float> y, RTSpan<float> dy,
-        bool use_saved = false) override {
+    void bp(
+		RTSpan<float> x, 
+		RTSpan<float> y, 
+		RTSpan<float> dy,
+        RTSpan<float> dx, 
+		bool use_saved = false
+	) override {
 		//apply_to_all_optimizers(set time to sequence length)
-		return ctr_bp(x.as_tspan<rank>(), y.as_tspan<rank>(), dy.as_tspan<rank>(), use_saved);
+		return ctr_bp(
+			x.as_tspan<xrank>(), 
+			y.as_tspan<yrank>(), 
+			dy.as_tspan<yrank>(), 
+			dx.as_tspan<xrank>(),
+			use_saved
+		);
 	}
 
-	virtual Tensor<float> ctr_ff(TSpan<rank, float> x, bool save = false) = 0;
+	virtual void ctr_ff(
+		TSpan<xrank, float> x, 
+		TSpan<yrank, float> y, 
+		bool save = false
+	) = 0;
 	
 	
-    virtual Tensor<float> ctr_bp(TSpan<rank, float> x, TSpan<rank, float> y, TSpan<rank, float> dy,
-                                 bool use_saved = false) = 0;
+    virtual void ctr_bp(
+		TSpan<xrank, float> x, 
+		TSpan<yrank, float> y, 
+		TSpan<yrank, float> dy,
+		TSpan<xrank, float> dx,
+        bool use_saved = false
+	) = 0;
 };
 
 std::ostream& operator<<(std::ostream &o, layer const& l);

@@ -13,4 +13,4 @@ test: tests/*.cpp *.cpp *.h
 
 clean:
 	rm -rf main 
-	rm -rf test
+	rm -rf 

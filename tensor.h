@@ -216,6 +216,33 @@ struct TSpan {
         return (*this)[n];
     }
 
+	//////////////////////////
+	//DEEP COPY FOR RANK > 1//
+	//////////////////////////
+	template <bool rank_is_1 = (rank == 1)>
+	std::enable_if_t<not rank_is_1,
+	void> deep_copy_to(TSpan<rank, T> other) {
+		assert(this->dims[0] == other.dims[0]);//Not the most efficient, but whatever
+		for (int i = 0; i < this->dims[0]; i++) {
+			(*this)[i].deep_copy_to(other[i]);
+		}
+	}
+
+	//////////////////////////
+	//DEEP COPY FOR RANK = 1//
+	//////////////////////////
+	template <bool rank_is_1 = (rank == 1)>
+	std::enable_if_t<rank_is_1,
+	void> deep_copy_to(TSpan<rank, T> other) {
+		assert(this->dims[0] == other.dims[0]);//Not the most efficient, but whatever
+		for (int i = 0; i < this->dims[0]; i++) {
+			other[i] = (*this)[i];
+		}
+	}
+
+	/////////
+	//OTHER//
+	/////////
 	//Don't need enable_if_t for this because we use a static_assert.
 	//(Always better to avoid enable_if_t)
     TSpan<2, T> transpose() const {
@@ -368,6 +395,21 @@ struct RTSpan {
     RTSpan<T> const back_index(int n) const {
         return RTSpan<T>(data + n*strides[rank-1], rank - 1, dims, strides, rc_data);
     }
+
+	void deep_copy_to(RTSpan<float> other) {
+		assert(rank == other.rank);
+		assert(dims[0] == other.dims[0]); //Not the most efficient, but whatever
+
+		if (rank == 1) {
+			for (int i = 0; i < dims[0]; i++) {
+				*((*this)[i]) = *(other[i]);
+			}
+		} else {
+			for (int i = 0; i < dims[0]; i++) {
+				(*this)[i].deep_copy_to(other[i]);
+			}
+		}
+	}
 
     RTSpan transpose() const {
         assert(rank == 2);
@@ -625,7 +667,7 @@ struct Tensor {
 	}
 
 	bool initialized() const {
-		return rank > 0; //I can't remember, can rank be equal to 0?
+		return rank >= 0; //I can't remember, can rank be equal to 0?
 	}
 
 	operator bool() {
